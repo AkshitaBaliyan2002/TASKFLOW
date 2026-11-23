@@ -1,0 +1,57 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - run: pytest --cov=app --cov-report=term-missing --cov-report=xml -v
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+  docker:
+    name: Build Docker image
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t taskflow:${{ github.sha }} .
+      - name: Smoke test container
+        run: |
+          docker run -d --name tf -p 5000:5000 taskflow:${{ github.sha }}
+          sleep 4
+          curl -fsS http://localhost:5000/health
+          docker rm -f tf
+
+  k8s-deploy:
+    name: Deploy to Kubernetes (kind)
+    needs: docker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+      - name: Build and load image into cluster
+        run: |
+          docker build -t taskflow:local .
+          kind load docker-image taskflow:local --name chart-testing
+      - name: Roll out
+        run: |
+          kubectl apply -f k8s/
+          kubectl rollout status deployment/taskflow --timeout=120s
+          kubectl get pods,svc
